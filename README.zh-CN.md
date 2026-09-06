@@ -83,6 +83,7 @@ pi-verdict 同时支持 [pi](https://github.com/badlogic/pi-mono) 与 [oh-my-pi]
 | `--auto-mode-debug` | 关 | 全量裁决通知 |
 | `PI_AUTO_MODE_MODEL` | — | 模型配置的环境变量形式 |
 | `PI_AUTO_MODE_DEBUG=1` | 关 | 调试的环境变量形式(flag 优先) |
+| `PI_VERDICT_LOG=0` | 开 | 关闭裁决日志(见下) |
 
 ### 用户自定义规则(`~/.pi/agent/config/pi-verdict.json`)
 
@@ -103,6 +104,10 @@ pi-verdict 同时支持 [pi](https://github.com/badlogic/pi-mono) 与 [oh-my-pi]
 - `ignoreTools` 列出规则未覆盖的工具(`todo`、`web_search`、MCP/自定义工具):直接放行、零模型调用;列出已覆盖工具的条目无效(仍受 deny floor 与用户规则约束)
 - `builtinDenyFloor: false` 整体关闭内置危险/路径拦截(风险自担;下方自保护层永远开启)
 - `classifierModel` 指定分类器模型,如 `"zai/glm-5.3-flash:low"`(支持思考后缀;缺省 = 会话模型且显式关思考)
+
+### 裁决日志
+
+每次裁决向 `<agent dir>/logs/pi-verdict-verdicts.jsonl` 追加一行 JSON(0600,超 8 MiB 轮转为 `.1`):`ts`、`session`、`cwd`、`ui`、`tool`、`action`(截断 300 字符)、`verdict`、`source`(`rule` / `classifier` / `protected-path` / `fail-closed` / `self-protection`)、`degraded`、`reason`、`model`(仅分类器调用)、`outcome`(`ran` / `blocked`,用户批准的 ask 记为 `ran`)、`blockReason`、`ms`(裁决延迟,不含对话框等待)。受保护路径的行不含路径明文。仅作观测:日志写入失败永不改变裁决。
 
 没有内置白名单——每一条「永远放行」声明都归你([为什么](docs/configuration.md#why-no-built-in-allowlist))。完整参考:[docs/configuration.md](docs/configuration.md)。
 

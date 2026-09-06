@@ -82,6 +82,7 @@ pi-verdict runs on both [pi](https://github.com/badlogic/pi-mono) and [oh-my-pi]
 | `--auto-mode-debug` | off | full verdict notifications |
 | `PI_AUTO_MODE_MODEL` | — | env form of the model flag |
 | `PI_AUTO_MODE_DEBUG=1` | off | env form of debug (flag wins) |
+| `PI_VERDICT_LOG=0` | on | disable the verdict log (below) |
 
 ### User rules (`~/.pi/agent/config/pi-verdict.json`)
 
@@ -102,6 +103,14 @@ pi-verdict runs on both [pi](https://github.com/badlogic/pi-mono) and [oh-my-pi]
 - `ignoreTools` names uncovered tools (`todo`, `web_search`, MCP/custom tools) that skip adjudication — allow with zero model calls; entries naming covered tools are inert
 - `builtinDenyFloor: false` turns off the built-in danger/path floor (your risk; the self-protection layer below always stays on)
 - `classifierModel` pins the classifier model, e.g. `"zai/glm-5.3-flash:low"` (thinking suffix supported; default: session model with thinking off)
+
+### Verdict log
+
+Every adjudicated tool call appends one JSON line to `<agent dir>/logs/pi-verdict-verdicts.jsonl` (mode 0600, rotated to `.1` past 8 MiB): `ts`, `session`, `cwd`, `ui`, `tool`, `action` (clipped to 300 chars), `verdict`, `source` (`rule` / `classifier` / `protected-path` / `fail-closed` / `self-protection`), `degraded`, `reason`, `model` (classifier calls only), `outcome` (`ran` / `blocked`, an approved ask is `ran`), `blockReason`, `ms` (adjudication latency, excluding any dialog wait). Protected-path lines carry no path plaintext. It is observability only — a logging failure never changes a verdict. Ask-rate per classifier model, for example:
+
+```sh
+jq -r 'select(.source=="classifier") | "\(.model) \(.verdict)"' ~/.omp/agent/logs/pi-verdict-verdicts.jsonl | sort | uniq -c
+```
 
 No built-in allowlist — every "always allow" claim is yours ([why](docs/configuration.md#why-no-built-in-allowlist)). Full reference: [docs/configuration.md](docs/configuration.md).
 

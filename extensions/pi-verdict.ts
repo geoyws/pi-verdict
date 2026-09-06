@@ -63,6 +63,8 @@
  *   --auto-mode-debug              notify on every verdict (incl. allows); shadow
  *                                   cache annotation on
  *   PI_AUTO_MODE_DEBUG=1           env-var form of the above (kept for compat)
+ *   PI_VERDICT_LOG=0               disable the per-verdict JSONL log at
+ *                                   <agentDir>/logs/pi-verdict-verdicts.jsonl (fork)
  *   <agentDir>/config/pi-verdict.json   user rules: { allow: [regex], deny: [regex],
  *                                   denyPaths: [path], builtinDenyFloor,
  *                                   classifierModel, toggleShortcut }
@@ -1382,6 +1384,41 @@ export async function adjudicate(
 // 扩展主体
 // ============================================================================
 
+// ============================================================================
+// Verdict log (fork): one JSON line per adjudicated tool call, so ask/deny
+// rates, reasons and classifier latency can be MEASURED across sessions
+// instead of reconstructed from memory ("M3 asks too often" was never
+// counted). <agentDir>/logs/pi-verdict-verdicts.jsonl, 0600, rotated to
+// `.1` past 8 MiB. Observability only: every failure is swallowed and no
+// verdict depends on it. PI_VERDICT_LOG=0 disables it. Protected-path
+// verdicts log no action line (ADR-0002: no path plaintext leaves the gate).
+// ============================================================================
+const VERDICT_LOG_MAX_BYTES = 8 * 1024 * 1024;
+const VERDICT_LOG_TEXT_CHARS = 300;
+
+export function verdictLogPath(agentDir: string = agentDirPath()): string {
+	return path.join(agentDir, "logs", "pi-verdict-verdicts.jsonl");
+}
+
+function clipLogText(s: string): string {
+	return s.length <= VERDICT_LOG_TEXT_CHARS ? s : `${s.slice(0, VERDICT_LOG_TEXT_CHARS)}…`;
+}
+
+export function appendVerdictLog(entry: Record<string, unknown>, file: string = verdictLogPath()): void {
+	if (process.env.PI_VERDICT_LOG === "0") return;
+	try {
+		fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+		try {
+			if (fs.statSync(file).size > VERDICT_LOG_MAX_BYTES) fs.renameSync(file, `${file}.1`);
+		} catch {
+			/* no log yet */
+		}
+		fs.appendFileSync(file, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+	} catch {
+		/* the log is observability, never a gate input */
+	}
+}
+
 /** Optional dependency injection for tests (#35): fake the compat fallback loader. */
 export interface AutoModeDeps {
 	compatLoader?: CompatLoader;
@@ -1565,13 +1602,30 @@ export default function autoMode(pi: ExtensionAPI, deps: AutoModeDeps = {}) {
 	pi.on("tool_call", async (event, ctx) => {
 		if (!enabled) return undefined;
 
+		const t0 = Date.now();
 		const input = event.input as Record<string, unknown>;
 		const action = describeAction(event.toolName, input);
+		// One log line per adjudicated call (fork). `ms` is the adjudication
+		// latency only — an ask's dialog wait is the user's time, not the gate's.
+		const record = (fields: Record<string, unknown>, ms: number, result: { block: true; reason: string } | undefined) =>
+			appendVerdictLog({
+				ts: new Date().toISOString(),
+				session: ctx.sessionManager.getSessionId(),
+				cwd: ctx.cwd,
+				ui: !!ctx.hasUI,
+				tool: event.toolName,
+				...fields,
+				outcome: result ? "blocked" : "ran",
+				...(result ? { blockReason: clipLogText(result.reason) } : {}),
+				ms,
+			});
 
 		// 第 0 层前置:变更检测(ADR-0001)——篡改后本会话恒 deny(fail-closed)
 		if (integrity.tampered) {
 			ctx.ui.notify(`🛡️ Auto Mode blocked: self-protection fail-closed (tamper detected this session; restart to reset)\n  ${action}`, "warning");
-			return { block: true, reason: "[auto-mode] self-protection: fail-closed until session restart (protected file was tampered with)" };
+			const r = { block: true as const, reason: "[auto-mode] self-protection: fail-closed until session restart (protected file was tampered with)" };
+			record({ action: clipLogText(action), verdict: "deny", source: "self-protection" }, Date.now() - t0, r);
+			return r;
 		}
 		const changed = integrity.detect();
 		if (changed.length > 0) {
@@ -1591,10 +1645,14 @@ export default function autoMode(pi: ExtensionAPI, deps: AutoModeDeps = {}) {
 					integrity.rebaseline(); // 重建基线
 					ctx.ui.notify("pi-verdict: config change accepted — new baseline taken; applies to new sessions as usual", "info");
 				} else {
-					return presentTamper(changed, ctx, choice === undefined ? "config dialog dismissed" : "config change declined by user");
+					const r = presentTamper(changed, ctx, choice === undefined ? "config dialog dismissed" : "config change declined by user");
+					record({ action: clipLogText(action), verdict: "deny", source: "self-protection" }, Date.now() - t0, r);
+					return r;
 				}
 			} else {
-				return presentTamper(changed, ctx, "");
+				const r = presentTamper(changed, ctx, "");
+				record({ action: clipLogText(action), verdict: "deny", source: "self-protection" }, Date.now() - t0, r);
+				return r;
 			}
 		}
 
@@ -1607,6 +1665,20 @@ export default function autoMode(pi: ExtensionAPI, deps: AutoModeDeps = {}) {
 			host: ctx.sessionManager,
 			signal: ctx.signal,
 		});
-		return presentVerdict(verdict, action, ctx);
+		const ms = Date.now() - t0;
+		const result = await presentVerdict(verdict, action, ctx);
+		record(
+			{
+				action: verdict.source === "protected-path" ? "(withheld: protected path)" : clipLogText(action),
+				verdict: verdict.verdict,
+				source: verdict.source,
+				degraded: verdict.degraded,
+				reason: clipLogText(verdict.reason),
+				...(verdict.source === "classifier" || verdict.source === "fail-closed" ? { model: resolveClassifier(ctx)?.model.id ?? null } : {}),
+			},
+			ms,
+			result,
+		);
+		return result;
 	});
 }

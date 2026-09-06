@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/lang/zh-CN/
 
 ## [Unreleased]
 
+### Added
+
+- Verdict log (fork): every adjudicated tool call appends one JSON line to `<agent dir>/logs/pi-verdict-verdicts.jsonl` (0600, rotated to `.1` past 8 MiB) — `verdict`, `source`, `reason`, `model`, `outcome` (`ran`/`blocked`, an approved ask is `ran`), `blockReason`, adjudication `ms`. Tamper fail-closed lines carry `source: self-protection`; protected-path lines carry no path plaintext (ADR-0002). Observability only: a logging failure never changes a verdict. `PI_VERDICT_LOG=0` disables it. Motivation: "the classifier asks too often" had never been counted — now ask-rate and reasons per classifier model are one `jq` away.
+
 ## [0.7.0] - 2026-09-04
 
 ### Changed

@@ -9,7 +9,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import autoMode, { adjudicate, BASH_MAX_MATCH_LEN, bindCompletion, buildProtectedSet, isProtectedWritePath, resolveAgentDir, SessionState } from "../extensions/pi-verdict.ts";
+import autoMode, { adjudicate, appendVerdictLog, BASH_MAX_MATCH_LEN, bindCompletion, buildProtectedSet, isProtectedWritePath, resolveAgentDir, SessionState, verdictLogPath } from "../extensions/pi-verdict.ts";
 
 // ── 桩设施 ──────────────────────────────────────────────
 
@@ -1658,5 +1658,98 @@ describe("adjudicate pipeline (interface level)", () => {
 		expect(r?.block).toBe(true);
 		expect(r.reason).not.toContain("secret-project");
 		for (const [msg] of h.notifies) expect(msg).not.toContain("secret-project");
+	});
+});
+
+// ── verdict log(fork):每次裁决一行 JSONL,供跨会话统计 ask/deny 率与延迟 ──
+
+describe("verdict log (fork)", () => {
+	const LOG = () => verdictLogPath(TMP_AGENT);
+	const readLog = () => fs.readFileSync(LOG(), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+	const resetLog = () => fs.rmSync(LOG(), { force: true });
+
+	test("rule allow, classifier ask (approved), classifier ask (declined) and fail-closed each land as one queryable line", async () => {
+		resetLog();
+		const h = session({ allow: ["^ls\\b"], classifierModel: "zai/flash" });
+		h.findMap = { "zai/flash": { id: "zai/flash" } };
+		await toolCall(h, "bash", { command: "ls -la" });
+		h.responses = [{ text: "<verdict>ask</verdict> writes outside the project" }];
+		h.confirmAnswer = true;
+		await toolCall(h, "bash", { command: "echo hi > /tmp/x" });
+		h.confirmAnswer = false;
+		await toolCall(h, "bash", { command: "echo hi > /tmp/y" });
+		h.responses = [new Error("provider down")];
+		await toolCall(h, "bash", { command: "date" });
+
+		const lines = readLog();
+		expect(lines).toHaveLength(4);
+		expect(lines[0]).toMatchObject({ tool: "bash", verdict: "allow", source: "rule", outcome: "ran", session: "s1", cwd: "/proj", ui: true });
+		expect(lines[0].action).toContain("ls -la");
+		expect(lines[0].model).toBeUndefined(); // a rule verdict never touched a model
+		expect(lines[1]).toMatchObject({ verdict: "ask", source: "classifier", degraded: false, outcome: "ran", model: "zai/flash" });
+		expect(lines[1].reason).toContain("writes outside the project");
+		expect(lines[2]).toMatchObject({ verdict: "ask", source: "classifier", outcome: "blocked" });
+		expect(lines[2].blockReason).toContain("user declined");
+		expect(lines[3]).toMatchObject({ verdict: "deny", source: "classifier", outcome: "blocked", model: "zai/flash" });
+		expect(lines[3].reason).toContain("fail-closed");
+		for (const l of lines) expect(typeof l.ms).toBe("number");
+		expect(fs.statSync(LOG()).mode & 0o777).toBe(0o600);
+	});
+
+	test("non-interactive ask degrades to deny and the line says so", async () => {
+		resetLog();
+		const h = session({});
+		h.ctx.hasUI = false;
+		h.responses = [{ text: "<verdict>ask</verdict> maybe" }];
+		await toolCall(h, "bash", { command: "echo hello" });
+		expect(readLog()[0]).toMatchObject({ verdict: "deny", source: "classifier", degraded: true, ui: false, outcome: "blocked" });
+	});
+
+	test("protected-path verdict logs no path plaintext (ADR-0002)", async () => {
+		resetLog();
+		const secret = "/proj/secret-project"; // 虚构路径:避开 /var 等系统目录 floor,落在会话 cwd 内
+		const h = session({ denyPaths: [secret] });
+		h.ctx.hasUI = false;
+		await toolCall(h, "write", { path: path.join(secret, "notes.md"), content: "x" });
+		const line = JSON.stringify(readLog()[0]);
+		expect(line).toContain('"source":"protected-path"');
+		expect(line).not.toContain("secret-project");
+	});
+
+	test("self-protection fail-closed after tamper is logged with its own source", async () => {
+		resetLog();
+		const h = session({});
+		h.ctx.hasUI = false;
+		const cfg = path.join(TMP_AGENT, "config", "pi-verdict.json");
+		await h.handlers["session_start"]({}, h.ctx);
+		fs.writeFileSync(cfg, "{}");
+		await toolCall(h, "bash", { command: "ls" });
+		await toolCall(h, "bash", { command: "ls" });
+		const lines = readLog();
+		expect(lines).toHaveLength(2);
+		for (const l of lines) expect(l).toMatchObject({ verdict: "deny", source: "self-protection", outcome: "blocked" });
+	});
+
+	test("PI_VERDICT_LOG=0 writes nothing; a failing log path never blocks a verdict", async () => {
+		resetLog();
+		process.env.PI_VERDICT_LOG = "0";
+		try {
+			const h = session({ allow: ["^ls\\b"] });
+			expect(await toolCall(h, "bash", { command: "ls" })).toBeUndefined();
+			expect(fs.existsSync(LOG())).toBe(false);
+		} finally {
+			delete process.env.PI_VERDICT_LOG;
+		}
+		expect(() => appendVerdictLog({ a: 1 }, path.join(os.tmpdir(), "pv-log-nodir", "x", "y.jsonl", "z", "w.jsonl"))).not.toThrow();
+	});
+
+	test("rotates to .1 past the size cap instead of growing unbounded", async () => {
+		await withTempDir("pv-rot-", (dir) => {
+			const file = path.join(dir, "v.jsonl");
+			fs.writeFileSync(file, "x".repeat(8 * 1024 * 1024 + 1));
+			appendVerdictLog({ fresh: true }, file);
+			expect(fs.statSync(`${file}.1`).size).toBe(8 * 1024 * 1024 + 1);
+			expect(fs.readFileSync(file, "utf8")).toBe('{"fresh":true}\n');
+		});
 	});
 });
