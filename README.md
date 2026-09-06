@@ -90,6 +90,7 @@ pi-verdict runs on both [pi](https://github.com/badlogic/pi-mono) and [oh-my-pi]
   "allow": ["^ls\\b", "^git (status|log|diff)\\b"],
   "deny":  ["rm ", "docker ", "^/etc/"],
   "denyPaths": ["~/Documents/private", "~/work/company"],
+  "ignoreTools": ["todo", "web_search"],
   "builtinDenyFloor": true,
   "classifierModel": null,
   "toggleShortcut": "ctrl+shift+a"
@@ -98,6 +99,7 @@ pi-verdict runs on both [pi](https://github.com/badlogic/pi-mono) and [oh-my-pi]
 
 - `allow`/`deny` are JS regex arrays; **`deny` wins over `allow`**, both beat the classifier
 - `denyPaths` are plain paths you declare **protected** — touches trigger a terminal ask you adjudicate (non-interactive → deny); the classifier never learns the paths themselves, only that they exist
+- `ignoreTools` names uncovered tools (`todo`, `web_search`, MCP/custom tools) that skip adjudication — allow with zero model calls; entries naming covered tools are inert
 - `builtinDenyFloor: false` turns off the built-in danger/path floor (your risk; the self-protection layer below always stays on)
 - `classifierModel` pins the classifier model, e.g. `"zai/glm-5.3-flash:low"` (thinking suffix supported; default: session model with thinking off)
 

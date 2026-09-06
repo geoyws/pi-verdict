@@ -9,6 +9,7 @@ Everything the gate reads from disk lives in `<agentDir>/config/pi-verdict.json`
   "allow": ["^ls\\b", "^git (status|log|diff)\\b"],
   "deny":  ["rm ", "docker ", "^/etc/"],
   "denyPaths": ["~/Documents/private", "~/work/company"],
+  "ignoreTools": ["todo", "web_search"],
   "builtinDenyFloor": true,
   "classifierModel": null,
   "toggleShortcut": "ctrl+shift+a"
@@ -18,6 +19,7 @@ Everything the gate reads from disk lives in `<agentDir>/config/pi-verdict.json`
 - `allow`/`deny` are JS regex arrays; **`deny` wins over `allow`**, both beat the classifier. Match targets: bash/powershell = the full command string; file tools = the resolved absolute path; other tools (e.g. MCP) are not covered by rules and land in the gray zone.
 - `denyPaths` are plain paths (not regexes) you declare **protected**: any tool call touching them — file tools via their path, bash via path tokens extracted from the command string — triggers a **terminal ask** you adjudicate (non-interactive sessions degrade to deny). Not affected by `builtinDenyFloor: false`.
   The classifier only ever learns that protected paths *exist*; the paths themselves never leave your machine, and a matched path shows **only** in the local confirm dialog.
+- `ignoreTools` is a plain list of tool names **outside** the command/file families (`todo`, `web_search`, MCP/custom tools, …) that skip adjudication entirely — verdict allow, zero model calls. Entries naming covered tools (`bash`/`read`/`write`/`edit`/`grep`/`find`/`ls`/`powershell`) are inert: those stay governed by the deny floor and your allow/deny rules, and the self-protection layer runs before any passthrough. An exempted tool that touches paths also drops the classifier's `denyPaths` existence-hint vigilance (uncovered tools never hit the path extractor).
 - `builtinDenyFloor: false` turns the built-in danger/path floor off entirely (risk accepted by you; the classifier and your rules remain — the self-protection layer always stays on).
 - `classifierModel: "provider/model-id"` sets the classifier model (e.g. a fast flash-class model); precedence is flag > env > config > session model (self-reflection); an invalid value falls back to the session model with a one-time warning.
 - The spec accepts pi's native `--model` thinking suffix: `"zai/glm-5.3-flash:low"` sets classifier thinking to effort low (default without suffix: thinking explicitly off).

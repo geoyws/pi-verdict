@@ -214,6 +214,11 @@ describe("user rules (deny > allow > gray)", () => {
 		expect(r?.block).toBe(true);
 		expect(h.calls.length).toBe(0);
 	});
+	test("config template contains the ignoreTools field", () => {
+		fs.rmSync(path.join(TMP_AGENT, "config", "pi-verdict.json"));
+		const h = makeHarness(); h.install(); // first run → template
+		expect(fs.readFileSync(path.join(TMP_AGENT, "config", "pi-verdict.json"), "utf8")).toContain("ignoreTools");
+	});
 	test("invalid regexes are skipped, valid ones still apply", async () => {
 		const h = session({ allow: ["^ls\\b"] }, ["[unclosed"]);
 		const r = await toolCall(h, "bash", { command: "ls -la" });
