@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/lang/zh-CN/
 
 - Verdict log (fork): every adjudicated tool call appends one JSON line to `<agent dir>/logs/pi-verdict-verdicts.jsonl` (0600, rotated to `.1` past 8 MiB) — `verdict`, `source`, `reason`, `model`, `outcome` (`ran`/`blocked`, an approved ask is `ran`), `blockReason`, adjudication `ms`. Tamper fail-closed lines carry `source: self-protection`; protected-path lines carry no path plaintext (ADR-0002). Observability only: a logging failure never changes a verdict. `PI_VERDICT_LOG=0` disables it. Motivation: "the classifier asks too often" had never been counted — now ask-rate and reasons per classifier model are one `jq` away.
 
+### Changed
+
+- Tamper disposal for the protected config in headless sessions (fork; [ADR-0001](docs/adr/0001-self-protection-layer.md) amendment 2026-09-06): a `config/pi-verdict.json` change detected with no UI now goes **fail-closed only** — the file is left on disk exactly as the user wrote it, and a session restart picks the new config up. The old behavior wrote the session snapshot back over the live file, which twice undid a legitimate operator commit to `omp/pi-verdict.json` (2026-09-05, `b9e61a2` → `d9ffe9b`; 2026-09-06 ~10:16 MYT, `fe8ad3a`) and, because the live config is a symlink into a dotfiles checkout, left that repository dirty. Unchanged: a modified **extension copy** is still restored from the snapshot + fail-closed (headless or not, and config files changed in the same batch are not written back), and an interactive **Decline**/dialog-dismiss still restores the config — that restore is the user's own choice. A deleted headless config is likewise not recreated; a deleted extension copy still is.
+
 ## [0.7.0] - 2026-09-04
 
 ### Changed

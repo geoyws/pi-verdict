@@ -11,9 +11,11 @@
  *      copy) → hard deny, reads pass; builtinDenyFloor:false cannot turn it off,
  *      user allow cannot override it. Tamper-detection backstop: watched files are
  *      re-verified before every verdict; if bypassed and modified → differential
- *      handling: extension copy changed / no UI → auto-restore + fail-closed for
- *      the session; config changed + UI → confirm dialog (keep = rebuild baseline,
- *      restore = rollback + fail-closed).
+ *      handling (ADR-0001 + its 2026-09-06 amendment): a changed extension copy is
+ *      always restored from the session snapshot + fail-closed; a changed config
+ *      with a UI gets a two-choice dialog (accept = rebuild baseline, decline =
+ *      rollback + fail-closed), and with no UI it is left on disk untouched (the
+ *      config is the user's file) with the session fail-closed until restart.
  *   1. Rule layer (built-in deny floor + user declarations):
  *      - built-in floor: bash danger regexes + path sensitivity S0-S5 → hard deny
  *        (on by default; builtinDenyFloor:false turns the whole floor off, at your
@@ -565,7 +567,7 @@ function hitDenyPaths(toolName: string, input: Record<string, unknown>, cwd: str
 // 绕过(诚实声明,ADR-0001)——由扩展主体的变更检测兜底。
 // ============================================================================
 
-interface ProtectedSet {
+export interface ProtectedSet {
 	/** 精确受保护文件(词法绝对路径 + realpath 双形) */
 	exact: string[];
 	/** 受保护目录前缀(npm 包安装形态:整个包目录) */
@@ -813,21 +815,52 @@ class IntegrityWatch {
 		this._tampered = false;
 	}
 
-	/** 从快照回写变化文件(扩展进程自身执行,不经门禁)+ fail-closed 置位 */
-	restoreAndFailClose(changed: Array<{ file: string }>, cause: string): { reason: string; files: string } {
+	/**
+	 * 处置回写(扩展进程自身执行,不经门禁)+ fail-closed 置位。回写按 kind 差分
+	 * (ADR-0001 修正 2026-09-06):
+	 *   - kind==="extension":一律从快照还原——副本被改没有合法途径;
+	 *   - kind==="config":仅当调用方显式 restoreConfig(交互式 Decline,即用户
+	 *     自己要求还原)才回写,否则原地保留。config 是用户自己的文件(常是指向
+	 *     git 检出的符号链接),无人可问的会话里回写会撤销用户刚落地的合法改动、
+	 *     并把那个检出弄脏;fail-closed 已足以挡住本会话,新配置下一会话生效。
+	 * reason/disposal 逐一交代「还原了谁、原地留下了谁」,不含糊其辞。
+	 */
+	restoreAndFailClose(
+		changed: Array<{ file: string; kind: WatchKind }>,
+		cause: string,
+		opts: { restoreConfig?: boolean } = {},
+	): { reason: string; files: string; disposal: string } {
+		const restored: string[] = [];
+		const left: string[] = [];
 		for (const c of changed) {
+			if (c.kind === "config" && opts.restoreConfig !== true) {
+				left.push(c.file);
+				continue;
+			}
 			const s = this.snapshots.find((x) => x.file === c.file);
 			if (s && s.content !== null) {
 				try {
 					fs.writeFileSync(s.file, s.content);
+					restored.push(c.file);
+					continue;
 				} catch {
-					/* 还原失败:仍 fail-closed */
+					/* 还原失败:仍 fail-closed,如实计入「原地保留」 */
 				}
 			}
+			// 基线里本就不存在(会话中新建)或回写失败:无可还原之物
+			left.push(c.file);
 		}
 		this._tampered = true;
 		const files = [...new Set(changed.map((c) => c.file))].join(", ");
-		return { reason: `[auto-mode] self-protection: tamper detected${cause ? ` (${cause})` : ""} and restored (${files}); fail-closed until restart`, files };
+		const clauses: string[] = [];
+		if (restored.length > 0) clauses.push(`restored ${[...new Set(restored)].join(", ")}`);
+		if (left.length > 0) clauses.push(`left in place ${[...new Set(left)].join(", ")}`);
+		const disposal = clauses.join("; ");
+		return {
+			reason: `[auto-mode] self-protection: tamper detected${cause ? ` (${cause})` : ""}${disposal ? `: ${disposal}` : ""}; fail-closed until restart`,
+			files,
+			disposal,
+		};
 	}
 }
 
@@ -1419,9 +1452,12 @@ export function appendVerdictLog(entry: Record<string, unknown>, file: string = 
 	}
 }
 
-/** Optional dependency injection for tests (#35): fake the compat fallback loader. */
+/** Optional dependency injection for tests (#35): fake the compat fallback loader;
+ *  override the self-anchored protected set (the anchor is import.meta.url, so a
+ *  test could otherwise only ever watch this very source file). */
 export interface AutoModeDeps {
 	compatLoader?: CompatLoader;
+	protectedSet?: ProtectedSet;
 }
 
 export default function autoMode(pi: ExtensionAPI, deps: AutoModeDeps = {}) {
@@ -1432,13 +1468,19 @@ export default function autoMode(pi: ExtensionAPI, deps: AutoModeDeps = {}) {
 	let enabled = pi.getFlag("auto-mode") !== false;
 	const debug = pi.getFlag("auto-mode-debug") === true || process.env.PI_AUTO_MODE_DEBUG === "1";
 	// 会话态与门禁完整性监视:复位清单各归 SessionState.reset / IntegrityWatch.startSession
-	const state = new SessionState(buildProtectedSet(agentDirPath(), OWN_FILE_PATH));
+	const state = new SessionState(deps.protectedSet ?? buildProtectedSet(agentDirPath(), OWN_FILE_PATH));
 	const integrity = new IntegrityWatch(state.prot.watchBases);
 
-	/** 篡改处置呈现:还原 + fail-closed 的本地通知(含文件清单与原因) */
-	function presentTamper(changed: Array<{ file: string; kind: WatchKind }>, ctx: ExtensionContext, cause: string): { block: true; reason: string } {
-		const r = integrity.restoreAndFailClose(changed, cause);
-		ctx.ui.notify(`🛡️ pi-verdict TAMPER DETECTED${cause ? ` (${cause})` : ""}: ${r.files} modified bypassing the gate; restored from session snapshot where possible. Fail-closed for the rest of this session — review the file(s) and restart the session.`, "warning");
+	/** 篡改处置呈现:按 kind 差分的回写 + fail-closed 通知(含文件清单、处置与原因)。
+	 *  restoreConfig 只由用户显式的 Decline/Esc 传入(ADR-0001 修正 2026-09-06);
+	 *  无人可问的 config-only 变更走「原地保留」文案——那是用户自己的文件。 */
+	function presentTamper(changed: Array<{ file: string; kind: WatchKind }>, ctx: ExtensionContext, cause: string, opts: { restoreConfig?: boolean } = {}): { block: true; reason: string } {
+		const r = integrity.restoreAndFailClose(changed, cause, opts);
+		if (opts.restoreConfig !== true && changed.every((c) => c.kind === "config")) {
+			ctx.ui.notify(`🛡️ pi-verdict PROTECTED CONFIG CHANGED${cause ? ` (${cause})` : ""}: ${r.files} changed mid-session with no one to ask. LEFT IN PLACE — the config is yours, so the gate never writes over it unattended; a session restart picks the new config up. Fail-closed for the rest of this session.`, "warning");
+			return { block: true, reason: r.reason };
+		}
+		ctx.ui.notify(`🛡️ pi-verdict TAMPER DETECTED${cause ? ` (${cause})` : ""}: ${r.files} modified bypassing the gate; ${r.disposal || "nothing to restore from the session snapshot"}. Fail-closed for the rest of this session — review the file(s) and restart the session.`, "warning");
 		return { block: true, reason: r.reason };
 	}
 
@@ -1629,12 +1671,19 @@ export default function autoMode(pi: ExtensionAPI, deps: AutoModeDeps = {}) {
 		}
 		const changed = integrity.detect();
 		if (changed.length > 0) {
-			// 差分处置(ADR-0001 定稿 D):仅 config 变化且有 UI → select 双选(选项即动作);
-			// 扩展副本被改 / 无 UI → 一律还原 + fail-closed。
+			// 差分处置(ADR-0001 定稿 D + 2026-09-06 修正):
+			//   有 UI 且仅 config → select 双选(选项即动作),Accept 重建基线,
+			//     Decline/Esc 是用户显式要求回滚 → 还原 config + fail-closed;
+			//   无 UI 且仅 config → 只 fail-closed,文件原地保留:那是用户自己的
+			//     文件(常是符号链接进 git 检出),无人可问时回写会撤销用户刚落地
+			//     的合法改动、并弄脏那个检出;新配置下一会话生效;
+			//   任一 extension 变更(有无 UI 皆然)→ 还原副本 + fail-closed
+			//     (同批次的 config 未经用户表态,不回写)。
 			// 用户合法的会话中手工编辑经「保留」一次确认即重建基线、会话照常
-		// (新配置照旧下一会话生效);无条件自动还原会把长驻会话变成
-		// 「用户永远无法修改配置」,与「仅用户可改」的设计初衷相悖。
-			if (ctx.hasUI && changed.every((c) => c.kind === "config")) {
+			// (新配置照旧下一会话生效);无条件自动还原会把长驻会话变成
+			// 「用户永远无法修改配置」,与「仅用户可改」的设计初衷相悖。
+			const configOnly = changed.every((c) => c.kind === "config");
+			if (ctx.hasUI && configOnly) {
 				// select 双选:选项文案即按钮(避免 confirm 固定 Yes/No 的映射歧义);
 				// 关闭对话框(Esc → undefined)无人背书,取安全侧同 Decline
 				const choice = await ctx.ui.select(
@@ -1645,11 +1694,18 @@ export default function autoMode(pi: ExtensionAPI, deps: AutoModeDeps = {}) {
 					integrity.rebaseline(); // 重建基线
 					ctx.ui.notify("pi-verdict: config change accepted — new baseline taken; applies to new sessions as usual", "info");
 				} else {
-					const r = presentTamper(changed, ctx, choice === undefined ? "config dialog dismissed" : "config change declined by user");
+					// 用户自己选的回滚:唯一会回写 config 的路径
+					const r = presentTamper(changed, ctx, choice === undefined ? "config dialog dismissed" : "config change declined by user", { restoreConfig: true });
 					record({ action: clipLogText(action), verdict: "deny", source: "self-protection" }, Date.now() - t0, r);
 					return r;
 				}
+			} else if (configOnly) {
+				// 无人可问的 config-only 变更:只 fail-closed,文件原地保留(不回写)
+				const r = presentTamper(changed, ctx, "headless config change", { restoreConfig: false });
+				record({ action: clipLogText(action), verdict: "deny", source: "self-protection" }, Date.now() - t0, r);
+				return r;
 			} else {
+				// 任一 extension 变更:副本一律还原(同批 config 不回写)
 				const r = presentTamper(changed, ctx, "");
 				record({ action: clipLogText(action), verdict: "deny", source: "self-protection" }, Date.now() - t0, r);
 				return r;

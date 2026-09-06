@@ -119,7 +119,7 @@ No built-in allowlist — every "always allow" claim is yours ([why](docs/config
 The gate's own files — the config and the installed extension copy — are **user-editable only**: writes from inside the gate hard-deny (reads pass); your editor never passes through the gate, the sudoers/visudo precedent.
 
 - **Not disableable by any config** — `builtinDenyFloor: false` and user `allow` rules cannot touch this layer
-- **Tamper detection** as the backstop: watched files are snapshotted at `session_start` and re-verified before every verdict — a changed extension copy is auto-restored and the session goes fail-closed; a changed config gets one explicit keep/restore confirm ([ADR-0001](docs/adr/0001-self-protection-layer.md) for the differential-disposal rationale)
+- **Tamper detection** as the backstop: watched files are snapshotted at `session_start` and re-verified before every verdict — a changed extension copy is auto-restored and the session goes fail-closed; a changed config gets one explicit keep/restore confirm — or, with no UI to ask, is left in place while the session goes fail-closed ([ADR-0001](docs/adr/0001-self-protection-layer.md) for the differential-disposal rationale)
 
 Requires pi ≥ 0.84. Works in interactive and non-interactive (`-p`/json/rpc) sessions; in non-interactive modes `ask` degrades to `deny`.
 

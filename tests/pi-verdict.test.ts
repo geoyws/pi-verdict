@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import autoMode, { adjudicate, appendVerdictLog, BASH_MAX_MATCH_LEN, bindCompletion, buildProtectedSet, isProtectedWritePath, resolveAgentDir, SessionState, verdictLogPath } from "../extensions/pi-verdict.ts";
+import type { ProtectedSet } from "../extensions/pi-verdict.ts";
 
 // ── 桩设施 ──────────────────────────────────────────────
 
@@ -32,7 +33,7 @@ interface Harness {
 	confirmMsgs: string[];
 	confirmAnswer: boolean;
 	findMap: Record<string, any> | undefined;
-	install: (opts?: { flag?: boolean; debug?: boolean; modelFlag?: string; compatLoader?: () => Promise<{ complete: any }> }) => void;
+	install: (opts?: { flag?: boolean; debug?: boolean; modelFlag?: string; compatLoader?: () => Promise<{ complete: any }>; protectedSet?: ProtectedSet }) => void;
 }
 
 function makeHarness(cwd: string = "/proj", opts?: { ompRegistry?: boolean }): Harness {
@@ -72,7 +73,7 @@ function makeHarness(cwd: string = "/proj", opts?: { ompRegistry?: boolean }): H
 	};
 	h.ctx = ctx;
 
-	h.install = (opts?: { flag?: boolean; debug?: boolean; modelFlag?: string; compatLoader?: () => Promise<{ complete: any }> }) => {
+	h.install = (opts?: { flag?: boolean; debug?: boolean; modelFlag?: string; compatLoader?: () => Promise<{ complete: any }>; protectedSet?: ProtectedSet }) => {
 		flags = { "auto-mode": opts?.flag ?? true, "auto-mode-debug": opts?.debug ?? false, ...(opts?.modelFlag ? { "auto-mode-model": opts.modelFlag } : {}) };
 		const prev = process.env.PI_AUTO_MODE_DEBUG;
 		if (opts?.debug) process.env.PI_AUTO_MODE_DEBUG = "1"; else delete process.env.PI_AUTO_MODE_DEBUG;
@@ -82,7 +83,10 @@ function makeHarness(cwd: string = "/proj", opts?: { ompRegistry?: boolean }): H
 			on: (e: string, fn: any) => { handlers[e] = fn; },
 			registerCommand: (n: string, c: any) => { commands[n] = c; },
 			registerShortcut: (k: string, o: any) => { shortcuts[k] = o; },
-		} as any, opts?.compatLoader ? { compatLoader: opts.compatLoader } : {});
+		} as any, {
+			...(opts?.compatLoader ? { compatLoader: opts.compatLoader } : {}),
+			...(opts?.protectedSet ? { protectedSet: opts.protectedSet } : {}),
+		});
 		if (prev !== undefined) process.env.PI_AUTO_MODE_DEBUG = prev; else delete process.env.PI_AUTO_MODE_DEBUG;
 	};
 	return h as Harness;
@@ -113,11 +117,12 @@ const toolCall = (h: Harness, toolName: string, input: any) => h.handlers.tool_c
 
 /** 开一个会话:按 cfg 写真实配置 → 建 harness → 装载扩展。顺序约束(配置先于装载)
  *  内化于此;opts 统一收纳全部变体:cwd/ompRegistry 给 makeHarness,
- *  invalid/flag/debug/modelFlag/compatLoader 分别传给 setConfig 与 install。 */
-function session(cfg: Parameters<typeof setConfig>[0], opts: { cwd?: string; ompRegistry?: boolean; invalid?: string[]; flag?: boolean; debug?: boolean; modelFlag?: string; compatLoader?: () => Promise<{ complete: any }> } = {}): Harness {
+ *  invalid/flag/debug/modelFlag/compatLoader 分别传给 setConfig 与 install;
+ *  protectedSet 覆盖自锚定的受保护集合(kind=extension 夹具用)。 */
+function session(cfg: Parameters<typeof setConfig>[0], opts: { cwd?: string; ompRegistry?: boolean; invalid?: string[]; flag?: boolean; debug?: boolean; modelFlag?: string; compatLoader?: () => Promise<{ complete: any }>; protectedSet?: ProtectedSet } = {}): Harness {
 	setConfig(cfg, opts.invalid);
 	const h = makeHarness(opts.cwd, { ompRegistry: opts.ompRegistry });
-	h.install({ flag: opts.flag, debug: opts.debug, modelFlag: opts.modelFlag, compatLoader: opts.compatLoader });
+	h.install({ flag: opts.flag, debug: opts.debug, modelFlag: opts.modelFlag, compatLoader: opts.compatLoader, protectedSet: opts.protectedSet });
 	return h;
 }
 
@@ -986,6 +991,20 @@ describe("buildProtectedSet (pure)", () => {
 describe("tamper detection (ADR-0001, differential disposal)", () => {
 	const CFG = () => path.join(TMP_AGENT, "config", "pi-verdict.json");
 
+	/** kind=extension 的会话夹具:harness 里的 autoMode 自锚定于本仓库源文件
+	 *  (dev checkout 形态),测试不能改动它;故经 deps.protectedSet 注入一份
+	 *  「真实临时 config + 临时安装副本」的受保护集合——buildProtectedSet 对任何
+	 *  ownFile 都收录一条监视项,watchBases 由此同时含 config 与 extension 两类。 */
+	const withExtCopy = (fn: (h: Harness, ext: string) => Promise<void>) =>
+		withTempDir("pv-tamper-ext-", async (root) => {
+			const ext = path.join(root, "extensions", "pi-verdict.ts");
+			fs.mkdirSync(path.dirname(ext), { recursive: true });
+			fs.writeFileSync(ext, "// installed copy (fixture)\n");
+			const h = session({}, { protectedSet: buildProtectedSet(TMP_AGENT, ext) });
+			h.ctx.hasUI = false; // headless:无人可问的处置面
+			await fn(h, ext);
+		});
+
 	test("interactive + Accept:用户会话中合法编辑 → 一次双选重建基线,会话照常,编辑保留", async () => {
 		const h = session({});
 		h.selectIndex = 0; // Accept the new version
@@ -1013,16 +1032,26 @@ describe("tamper detection (ADR-0001, differential disposal)", () => {
 		expect(r2?.block).toBe(true);
 		expect(r2.reason).toContain("fail-closed");
 	});
-	test("headless config change:无人可问 → 不确认,直接还原 + fail-closed", async () => {
+	test("headless config change:无人可问 → 只 fail-closed,文件原地保留(不回写)", async () => {
+		// 2026-09-06 修正:config 是用户自己的文件(常是符号链接进 git 检出),
+		// headless 回写会撤销用户刚落地的合法改动并弄脏那个检出
 		const h = session({});
 		h.ctx.hasUI = false;
-		const before = fs.readFileSync(CFG(), "utf8");
-		fs.writeFileSync(CFG(), "{}");
+		setConfig({ allow: ["^ls\\b"] }); // 用户在会话中落地的合法编辑(不经门禁)
+		const edited = fs.readFileSync(CFG(), "utf8");
 		const r = await toolCall(h, "bash", { command: "ls" });
 		expect(h.selects).toBe(0); // 无 UI 不弹双选
 		expect(r?.block).toBe(true);
-		expect(r.reason).toContain("tamper");
-		expect(fs.readFileSync(CFG(), "utf8")).toBe(before);
+		expect(r.reason).toContain("headless config change");
+		expect(r.reason).toContain(`left in place ${CFG()}`);
+		expect(r.reason).not.toContain("restored");
+		expect(fs.readFileSync(CFG(), "utf8")).toBe(edited); // 用户的改动仍在盘上
+		const notice = h.notifies.at(-1)?.[0] ?? ""; // 用户面的交代:未回写 + 重启生效
+		expect(notice).toContain("LEFT IN PLACE");
+		expect(notice).toContain("restart");
+		const r2 = await toolCall(h, "bash", { command: "ls" });
+		expect(r2?.block).toBe(true); // fail-closed 贯穿本会话
+		expect(r2.reason).toContain("fail-closed");
 	});
 	test("clean session: no tamper signal, verdicts flow normally", async () => {
 		const h = session({});
@@ -1052,15 +1081,42 @@ describe("tamper detection (ADR-0001, differential disposal)", () => {
 		expect(r.reason).toContain("dialog dismissed");
 		expect(fs.readFileSync(CFG(), "utf8")).toBe(before); // 已还原
 	});
-	test("headless config deleted mid-session → recreated from snapshot + fail-closed", async () => {
+	test("headless config deleted mid-session → 不代用户重建,只 fail-closed", async () => {
 		const h = session({});
 		h.ctx.hasUI = false;
-		const before = fs.readFileSync(CFG(), "utf8");
 		fs.rmSync(CFG());
 		const r = await toolCall(h, "bash", { command: "ls" });
 		expect(r?.block).toBe(true);
-		expect(fs.existsSync(CFG())).toBe(true); // 删除亦被还原(重建)
-		expect(fs.readFileSync(CFG(), "utf8")).toBe(before);
+		expect(fs.existsSync(CFG())).toBe(false); // 删除同属 config 处置:不回写
+		expect(r.reason).toContain(`left in place ${CFG()}`);
+		const r2 = await toolCall(h, "bash", { command: "ls" });
+		expect(r2?.block).toBe(true);
+		expect(r2.reason).toContain("fail-closed");
+	});
+	test("headless extension copy change → 一律从快照还原 + fail-closed", async () => {
+		await withExtCopy(async (h, ext) => {
+			const before = fs.readFileSync(ext, "utf8");
+			fs.writeFileSync(ext, "// tampered\n");
+			const r = await toolCall(h, "bash", { command: "ls" });
+			expect(r?.block).toBe(true);
+			expect(fs.readFileSync(ext, "utf8")).toBe(before); // 副本被改无合法途径 → 还原
+			expect(r.reason).toContain(`restored ${ext}`);
+			expect(r.reason).not.toContain("left in place");
+		});
+	});
+	test("headless 混合批次(config 与扩展副本同时变)→ 只还原副本,config 原地保留", async () => {
+		await withExtCopy(async (h, ext) => {
+			const extBefore = fs.readFileSync(ext, "utf8");
+			fs.writeFileSync(ext, "// tampered\n");
+			setConfig({ allow: ["^ls\\b"] }); // 同批次里用户自己的合法编辑
+			const cfgEdited = fs.readFileSync(CFG(), "utf8");
+			const r = await toolCall(h, "bash", { command: "ls" });
+			expect(r?.block).toBe(true);
+			expect(fs.readFileSync(ext, "utf8")).toBe(extBefore); // 副本还原
+			expect(fs.readFileSync(CFG(), "utf8")).toBe(cfgEdited); // config 未经用户表态 → 不回写
+			expect(r.reason).toContain(`restored ${ext}`);
+			expect(r.reason).toContain(`left in place ${CFG()}`);
+		});
 	});
 });
 
