@@ -100,7 +100,7 @@ pi-verdict 同时支持 [pi](https://github.com/badlogic/pi-mono) 与 [oh-my-pi]
 
 - `allow`/`deny` 为 JS 正则数组;**`deny` 优先于 `allow`**,两者都优先于分类器
 - `denyPaths` 是你声明**受保护**的普通路径列表:触碰触发**终局 ask** 由你裁决(非交互降级 deny);分类器只被告知路径**存在**,路径明文永不出本机
-- `ignoreTools` 列出规则未覆盖的工具(`todo`、`web_search`、MCP/自定义工具):整链放行、零模型调用;列出已覆盖工具的条目无效(仍受 deny floor 与用户规则约束)
+- `ignoreTools` 列出规则未覆盖的工具(`todo`、`web_search`、MCP/自定义工具):直接放行、零模型调用;列出已覆盖工具的条目无效(仍受 deny floor 与用户规则约束)
 - `builtinDenyFloor: false` 整体关闭内置危险/路径拦截(风险自担;下方自保护层永远开启)
 - `classifierModel` 指定分类器模型,如 `"zai/glm-5.3-flash:low"`(支持思考后缀;缺省 = 会话模型且显式关思考)
 
