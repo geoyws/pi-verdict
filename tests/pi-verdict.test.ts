@@ -97,7 +97,7 @@ function makeHarness(cwd: string = "/proj", opts?: { ompRegistry?: boolean }): H
 beforeAll(() => { process.env.PI_CODING_AGENT_DIR = TMP_AGENT; });
 afterAll(() => { delete process.env.PI_CODING_AGENT_DIR; });
 
-function setConfig(cfg: { allow?: string[]; deny?: string[]; denyPaths?: unknown[]; ignoreTools?: unknown[]; builtinDenyFloor?: boolean; classifierModel?: string | null; toggleShortcut?: string | null; enabledByDefault?: unknown }, invalid?: string[]): void {
+function setConfig(cfg: { allow?: string[]; deny?: string[]; denyPaths?: unknown[]; ignoreTools?: unknown[]; builtinDenyFloor?: boolean; classifierModel?: string | null; toggleShortcut?: string | null; enabledByDefault?: unknown; tamperResponse?: unknown }, invalid?: string[]): void {
 	config = { allow: cfg.allow ?? [], deny: cfg.deny ?? [] };
 	const p = path.join(TMP_AGENT, "config", "pi-verdict.json");
 	fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -106,6 +106,7 @@ function setConfig(cfg: { allow?: string[]; deny?: string[]; denyPaths?: unknown
 	if (cfg.builtinDenyFloor !== undefined) raw.builtinDenyFloor = cfg.builtinDenyFloor;
 	if (cfg.toggleShortcut !== undefined) raw.toggleShortcut = cfg.toggleShortcut;
 	if (cfg.enabledByDefault !== undefined) raw.enabledByDefault = cfg.enabledByDefault;
+	if (cfg.tamperResponse !== undefined) raw.tamperResponse = cfg.tamperResponse;
 	// denyPaths (ADR-0002): unknown[] lets negative tests mix in non-string entries
 	if (cfg.denyPaths !== undefined) raw.denyPaths = cfg.denyPaths;
 	// 非法正则测试:把 invalid 条目直接混入 allow 数组
@@ -1027,7 +1028,7 @@ describe("buildProtectedSet (pure)", () => {
 
 // ── 9. 变更检测(ADR-0001:差分处置 D) ──────────────────
 
-describe("tamper detection (ADR-0001, differential disposal)", () => {
+describe("tamper detection (ADR-0001, differential disposal) — tamperResponse: fail-closed (upstream behaviour, opt-in on the fork)", () => {
 	const CFG = () => path.join(TMP_AGENT, "config", "pi-verdict.json");
 
 	/** kind=extension 的会话夹具:harness 里的 autoMode 自锚定于本仓库源文件
@@ -1039,13 +1040,13 @@ describe("tamper detection (ADR-0001, differential disposal)", () => {
 			const ext = path.join(root, "extensions", "pi-verdict.ts");
 			fs.mkdirSync(path.dirname(ext), { recursive: true });
 			fs.writeFileSync(ext, "// installed copy (fixture)\n");
-			const h = session({}, { protectedSet: buildProtectedSet(TMP_AGENT, ext) });
+			const h = session({ tamperResponse: "fail-closed" }, { protectedSet: buildProtectedSet(TMP_AGENT, ext) });
 			h.ctx.hasUI = false; // headless:无人可问的处置面
 			await fn(h, ext);
 		});
 
 	test("interactive + Accept:用户会话中合法编辑 → 一次双选重建基线,会话照常,编辑保留", async () => {
-		const h = session({});
+		const h = session({ tamperResponse: "fail-closed" });
 		h.selectIndex = 0; // Accept the new version
 		setConfig({ allow: ["^ls\\b"] }); // 模拟用户手工编辑(不经门禁)
 		h.responses = [{ text: "<verdict>allow</verdict> ok" }, { text: "<verdict>allow</verdict> ok" }];
@@ -1059,7 +1060,7 @@ describe("tamper detection (ADR-0001, differential disposal)", () => {
 		expect(r2).toBeUndefined(); // 会话未被砖
 	});
 	test("interactive + Decline:疑似篡改 → 还原 + 本会话 fail-closed", async () => {
-		const h = session({});
+		const h = session({ tamperResponse: "fail-closed" });
 		h.selectIndex = 1; // Decline — restore the session baseline
 		const before = fs.readFileSync(CFG(), "utf8");
 		fs.writeFileSync(CFG(), JSON.stringify({ allow: [".*"], builtinDenyFloor: false })); // 模拟绕过门禁的篡改
@@ -1074,7 +1075,7 @@ describe("tamper detection (ADR-0001, differential disposal)", () => {
 	test("headless config change:无人可问 → 只 fail-closed,文件原地保留(不回写)", async () => {
 		// 2026-09-06 修正:config 是用户自己的文件(常是符号链接进 git 检出),
 		// headless 回写会撤销用户刚落地的合法改动并弄脏那个检出
-		const h = session({});
+		const h = session({ tamperResponse: "fail-closed" });
 		h.ctx.hasUI = false;
 		setConfig({ allow: ["^ls\\b"] }); // 用户在会话中落地的合法编辑(不经门禁)
 		const edited = fs.readFileSync(CFG(), "utf8");
@@ -1093,14 +1094,14 @@ describe("tamper detection (ADR-0001, differential disposal)", () => {
 		expect(r2.reason).toContain("fail-closed");
 	});
 	test("clean session: no tamper signal, verdicts flow normally", async () => {
-		const h = session({});
+		const h = session({ tamperResponse: "fail-closed" });
 		h.responses = [{ text: "<verdict>allow</verdict> ok" }];
 		const r = await toolCall(h, "bash", { command: "cargo build" });
 		expect(r).toBeUndefined();
 		expect(h.notifies.some(([m]) => m.includes("TAMPER"))).toBe(false);
 	});
 	test("session_start rebuilds baseline (legit edit between sessions accepted)", async () => {
-		const h = session({});
+		const h = session({ tamperResponse: "fail-closed" });
 		setConfig({ allow: ["^ls\\b"] }); // 会话间隙合法修改(不经门禁)
 		await h.handlers.session_start({}, h.ctx); // 新基线
 		h.responses = [{ text: "<verdict>deny</verdict> x" }];
@@ -1110,7 +1111,7 @@ describe("tamper detection (ADR-0001, differential disposal)", () => {
 		expect(h.selects).toBe(0); // 无变化不弹双选
 	});
 	test("interactive + Esc 关闭双选:无人背书 → 安全侧同 Decline(还原 + fail-closed)", async () => {
-		const h = session({});
+		const h = session({ tamperResponse: "fail-closed" });
 		h.selectIndex = null; // select 返回 undefined(对话框被关闭)
 		const before = fs.readFileSync(CFG(), "utf8");
 		fs.writeFileSync(CFG(), "{}");
@@ -1121,7 +1122,7 @@ describe("tamper detection (ADR-0001, differential disposal)", () => {
 		expect(fs.readFileSync(CFG(), "utf8")).toBe(before); // 已还原
 	});
 	test("headless config deleted mid-session → 不代用户重建,只 fail-closed", async () => {
-		const h = session({});
+		const h = session({ tamperResponse: "fail-closed" });
 		h.ctx.hasUI = false;
 		fs.rmSync(CFG());
 		const r = await toolCall(h, "bash", { command: "ls" });
@@ -1156,6 +1157,80 @@ describe("tamper detection (ADR-0001, differential disposal)", () => {
 			expect(r.reason).toContain(`restored ${ext}`);
 			expect(r.reason).toContain(`left in place ${CFG()}`);
 		});
+	});
+});
+
+// ── tamperResponse "warn" (fork default, geoyws 2026-09-08): a live session never
+// bricks itself or rewrites the operator's files because something changed on disk.
+describe("tamperResponse warn (fork default)", () => {
+	const CFG = () => path.join(TMP_AGENT, "config", "pi-verdict.json");
+	const withExtCopy = (cfg: Parameters<typeof setConfig>[0], fn: (h: Harness, ext: string) => Promise<void>) =>
+		withTempDir("pv-warn-ext-", async (root) => {
+			const ext = path.join(root, "extensions", "pi-verdict.ts");
+			fs.mkdirSync(path.dirname(ext), { recursive: true });
+			fs.writeFileSync(ext, "// installed copy (fixture)\n");
+			const h = session(cfg, { protectedSet: buildProtectedSet(TMP_AGENT, ext) });
+			h.ctx.hasUI = false;
+			await fn(h, ext);
+		});
+
+	test("extension copy replaced under a live headless session → warn once, keep running, never restore", async () => {
+		await withExtCopy({ allow: ["^ls\\b"] }, async (h, ext) => {
+			fs.writeFileSync(ext, "// new build installed by the operator\n");
+			expect(await toolCall(h, "bash", { command: "ls" })).toBeUndefined(); // the call runs
+			expect(fs.readFileSync(ext, "utf8")).toBe("// new build installed by the operator\n"); // nothing written back
+			const warns = h.notifies.filter(([m, l]) => l === "warning" && m.includes(ext));
+			expect(warns).toHaveLength(1);
+			expect(warns[0][0]).toContain("restart");
+			expect(await toolCall(h, "bash", { command: "ls" })).toBeUndefined(); // still running
+			expect(h.notifies.filter(([m]) => m.includes(ext))).toHaveLength(1); // rebaselined: no repeat
+			expect((await toolCall(h, "bash", { command: "rm " + "-rf /tmp/x" }))?.block).toBe(true); // gate itself still on
+		});
+	});
+	test("config edited under a live interactive session → no dialog, file left, loaded rules kept", async () => {
+		const h = session({ allow: ["^ls\\b"] });
+		h.selectIndex = 1; // would be Decline if a dialog ever opened
+		fs.writeFileSync(CFG(), JSON.stringify({ allow: [], deny: ["^ls"] })); // operator's hand edit
+		expect(await toolCall(h, "bash", { command: "ls" })).toBeUndefined(); // loaded rules still allow ls
+		expect(h.selects).toBe(0);
+		expect(JSON.parse(fs.readFileSync(CFG(), "utf8")).deny).toEqual(["^ls"]); // left exactly as edited
+		expect(h.notifies.filter(([, l]) => l === "warning")).toHaveLength(1);
+		await h.handlers.session_start({}, h.ctx); // a new session reads the edit
+		expect((await toolCall(h, "bash", { command: "ls" }))?.block).toBe(true);
+	});
+	test("absent or mistyped key is warn; only the literal fail-closed restores + bricks", async () => {
+		await withExtCopy({ tamperResponse: "hard", allow: ["^ls\\b"] }, async (h, ext) => {
+			fs.writeFileSync(ext, "// changed\n");
+			expect(await toolCall(h, "bash", { command: "ls" })).toBeUndefined();
+			expect(fs.readFileSync(ext, "utf8")).toBe("// changed\n");
+		});
+		await withExtCopy({ tamperResponse: "fail-closed", allow: ["^ls\\b"] }, async (h, ext) => {
+			const before = fs.readFileSync(ext, "utf8");
+			fs.writeFileSync(ext, "// changed\n");
+			expect((await toolCall(h, "bash", { command: "ls" }))?.block).toBe(true);
+			expect(fs.readFileSync(ext, "utf8")).toBe(before);
+		});
+	});
+	test("the warning is logged as its own line, and the call's verdict still gets one", async () => {
+		const LOG = verdictLogPath(TMP_AGENT);
+		fs.rmSync(LOG, { force: true });
+		const h = session({ allow: ["^ls\\b"] });
+		h.ctx.hasUI = false;
+		await h.handlers.session_start({}, h.ctx);
+		fs.writeFileSync(CFG(), "{}");
+		await toolCall(h, "bash", { command: "ls" });
+		const lines = fs.readFileSync(LOG, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+		expect(lines).toHaveLength(2);
+		expect(lines[0]).toMatchObject({ verdict: "warn", source: "self-protection", outcome: "continued" });
+		expect(lines[0].files).toContain(CFG()); // both firmlink forms of the path are watched; the real one is named
+		expect(lines[1]).toMatchObject({ outcome: "ran" });
+	});
+	test("config template carries tamperResponse: warn", () => {
+		fs.rmSync(path.join(TMP_AGENT, "config"), { recursive: true, force: true });
+		const h = makeHarness(); h.install();
+		const raw = JSON.parse(fs.readFileSync(path.join(TMP_AGENT, "config", "pi-verdict.json"), "utf8"));
+		expect(raw.tamperResponse).toBe("warn");
+		expect(raw._hint).toContain("tamperResponse");
 	});
 });
 
@@ -1813,7 +1888,7 @@ describe("verdict log (fork)", () => {
 
 	test("self-protection fail-closed after tamper is logged with its own source", async () => {
 		resetLog();
-		const h = session({});
+		const h = session({ tamperResponse: "fail-closed" });
 		h.ctx.hasUI = false;
 		const cfg = path.join(TMP_AGENT, "config", "pi-verdict.json");
 		await h.handlers["session_start"]({}, h.ctx);

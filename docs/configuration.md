@@ -13,7 +13,8 @@ Everything the gate reads from disk lives in `<agentDir>/config/pi-verdict.json`
   "builtinDenyFloor": true,
   "classifierModel": null,
   "toggleShortcut": "ctrl+shift+a",
-  "enabledByDefault": true
+  "enabledByDefault": true,
+  "tamperResponse": "warn"
 }
 ```
 
@@ -26,6 +27,7 @@ Everything the gate reads from disk lives in `<agentDir>/config/pi-verdict.json`
 - The spec accepts pi's native `--model` thinking suffix: `"zai/glm-5.3-flash:low"` sets classifier thinking to effort low (default without suffix: thinking explicitly off).
 - `toggleShortcut` rebinds the master-switch toggle key (`null` or empty disables it, not persisted).
 - `enabledByDefault` (fork) seeds the master switch at session start when neither `--auto-mode` nor `--no-auto-mode` was passed. `true` (the default, and upstream's behaviour) starts gated; `false` starts **ungated** — the footer shows `auto mode off` and every tool call runs directly until `/automode on` or the toggle key. Only a literal `false` turns it off; a missing, `null` or mistyped value keeps the gate on. Read once per session, like `toggleShortcut`; the config reload at `session_start` never reverts a runtime `/automode` choice.
+- `tamperResponse` (fork) is what a **live** session does when this file or the installed extension copy changes underneath it. `"warn"` (the fork default): notify once, take a new baseline, keep the build and rules already loaded, and carry on — nothing is written back, nobody is asked, nothing fails closed; the change applies to new sessions. So installing a new copy or hand-editing the config never wedges a running session or overwrites your file. `"fail-closed"` is upstream's response: restore the session snapshot (extension always; config only when you decline the dialog) and deny every call until restart. Only the literal `"fail-closed"` selects it.
 
 ## Why no built-in allowlist?
 

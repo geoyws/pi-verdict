@@ -74,7 +74,15 @@
  *                                   <agentDir>/logs/pi-verdict-verdicts.jsonl (fork)
  *   <agentDir>/config/pi-verdict.json   user rules: { allow: [regex], deny: [regex],
  *                                   denyPaths: [path], builtinDenyFloor,
- *                                   classifierModel, toggleShortcut, enabledByDefault }
+ *                                   classifierModel, toggleShortcut, enabledByDefault,
+ *                                   tamperResponse }
+ *   tamperResponse (fork)          what a LIVE session does when a protected
+ *                                   file changes underneath it: "warn" (fork
+ *                                   default) notifies once, leaves the file
+ *                                   alone, keeps the loaded build/rules and
+ *                                   carries on — the change applies to new
+ *                                   sessions; "fail-closed" is upstream's
+ *                                   restore + deny-until-restart response
  *                                   match target: bash = full command string /
  *                                   file tools = absolute path; new session applies;
  *                                   protected by the self-protection layer (the
@@ -281,9 +289,14 @@ interface UserRules {
 	 *  ungated and the owner opts in per session via /automode on or the toggle
 	 *  shortcut. Read once at install, like toggleShortcut. */
 	enabledByDefault: boolean;
+	/** Fork: response of a LIVE session to a protected file changing on disk.
+	 *  "warn" (default): notify once, rebaseline, keep the loaded build and rules,
+	 *  continue — nothing is written back and nothing fails closed; the change is
+	 *  for new sessions. "fail-closed": upstream's restore + deny-until-restart. */
+	tamperResponse: "warn" | "fail-closed";
 }
 
-const EMPTY_RULES: UserRules = { allow: [], deny: [], denyPaths: [], builtinDenyFloor: true, classifierModel: null, toggleShortcut: DEFAULT_TOGGLE_SHORTCUT, ignoreTools: [], enabledByDefault: true };
+const EMPTY_RULES: UserRules = { allow: [], deny: [], denyPaths: [], builtinDenyFloor: true, classifierModel: null, toggleShortcut: DEFAULT_TOGGLE_SHORTCUT, ignoreTools: [], enabledByDefault: true, tamperResponse: "warn" };
 
 /** This module's own file location (import.meta.url resolved; null = unresolvable). */
 const OWN_FILE_PATH: string | null = (() => {
@@ -332,7 +345,7 @@ function userConfigPath(): string {
 }
 
 const USER_CONFIG_TEMPLATE = `${JSON.stringify({
-	_hint: "pi-verdict user rules. allow/deny are JS regex arrays; deny wins over allow. Match target: bash = full command string, file tools = absolute path. denyPaths is a list of protected path prefixes (plain paths, not regexes; the tool owns normalization — ~, $HOME, relative, .. and symlink forms all resolve, case folds on macOS/Windows — and any access attempt, including from bash command strings, asks for your confirmation, degrading to deny in non-interactive sessions; priority: after your deny rules, before your allow rules; never sent to the classifier). ignoreTools is a list of tool names outside the command/file families (e.g. todo, web_search, MCP/custom tools) that skip adjudication entirely — allow with zero model calls; entries naming covered tools (bash/read/write/edit/grep/find/ls/powershell) are inert: those stay governed by the deny floor and your allow/deny rules. builtinDenyFloor=false disables the built-in danger/path floor (at your own risk; the self-protection layer always stays on and cannot be turned off by any config). classifierModel persistently sets the classifier model (provider/id, e.g. zai/glm-5.3-flash; accepts a pi-native thinking suffix, e.g. zai/glm-5.3-flash:low; empty = self-reflection, inherit session model). toggleShortcut sets the master-switch toggle key (pi key combo, e.g. ctrl+shift+a; null or empty disables the shortcut). enabledByDefault sets the master switch at session start when no --auto-mode/--no-auto-mode flag is given (true = gate on, the default; false = start ungated and opt in with /automode on or the toggle key). This file is part of the permission gate itself: pi-verdict denies any agent-side modification of it — edit it manually outside pi. Changes apply to new sessions.",
+	_hint: "pi-verdict user rules. allow/deny are JS regex arrays; deny wins over allow. Match target: bash = full command string, file tools = absolute path. denyPaths is a list of protected path prefixes (plain paths, not regexes; the tool owns normalization — ~, $HOME, relative, .. and symlink forms all resolve, case folds on macOS/Windows — and any access attempt, including from bash command strings, asks for your confirmation, degrading to deny in non-interactive sessions; priority: after your deny rules, before your allow rules; never sent to the classifier). ignoreTools is a list of tool names outside the command/file families (e.g. todo, web_search, MCP/custom tools) that skip adjudication entirely — allow with zero model calls; entries naming covered tools (bash/read/write/edit/grep/find/ls/powershell) are inert: those stay governed by the deny floor and your allow/deny rules. builtinDenyFloor=false disables the built-in danger/path floor (at your own risk; the self-protection layer always stays on and cannot be turned off by any config). classifierModel persistently sets the classifier model (provider/id, e.g. zai/glm-5.3-flash; accepts a pi-native thinking suffix, e.g. zai/glm-5.3-flash:low; empty = self-reflection, inherit session model). toggleShortcut sets the master-switch toggle key (pi key combo, e.g. ctrl+shift+a; null or empty disables the shortcut). enabledByDefault sets the master switch at session start when no --auto-mode/--no-auto-mode flag is given (true = gate on, the default; false = start ungated and opt in with /automode on or the toggle key). tamperResponse is what a live session does when this file or the installed extension changes underneath it: 'warn' (the default) notifies once and carries on with what it already loaded — the change applies to new sessions; 'fail-closed' restores the session snapshot and denies every call until restart. This file is part of the permission gate itself: pi-verdict denies any agent-side modification of it — edit it manually outside pi. Changes apply to new sessions.",
 	allow: ["^ls\\b"],
 	deny: [],
 	denyPaths: [],
@@ -341,6 +354,7 @@ const USER_CONFIG_TEMPLATE = `${JSON.stringify({
 	classifierModel: null,
 	toggleShortcut: DEFAULT_TOGGLE_SHORTCUT,
 	enabledByDefault: true,
+	tamperResponse: "warn",
 }, null, 2)}\n`;
 
 /**
@@ -358,7 +372,7 @@ function loadUserRules(): { rules: UserRules; skipped: string[]; shortcutWarning
 			} catch { /* 只读环境静默跳过 */ }
 			return { rules: EMPTY_RULES, skipped: [], shortcutWarning: null };
 		}
-		let raw: { allow?: unknown; deny?: unknown; denyPaths?: unknown; ignoreTools?: unknown; builtinDenyFloor?: unknown; classifierModel?: unknown; toggleShortcut?: unknown; enabledByDefault?: unknown };
+		let raw: { allow?: unknown; deny?: unknown; denyPaths?: unknown; ignoreTools?: unknown; builtinDenyFloor?: unknown; classifierModel?: unknown; toggleShortcut?: unknown; enabledByDefault?: unknown; tamperResponse?: unknown };
 		try {
 			raw = JSON.parse(fs.readFileSync(p, "utf8")) as typeof raw;
 		} catch (err) {
@@ -408,6 +422,9 @@ function loadUserRules(): { rules: UserRules; skipped: string[]; shortcutWarning
 				// Only a literal false turns the default off: a missing, null or mistyped
 				// value keeps upstream's gate-on start, so a typo cannot silently ungate
 				enabledByDefault: raw.enabledByDefault !== false,
+				// Only the literal "fail-closed" selects upstream's hard response; anything
+				// else (absent, mistyped) is the fork default, which never bricks a session
+				tamperResponse: raw.tamperResponse === "fail-closed" ? "fail-closed" : "warn",
 			},
 			skipped,
 			shortcutWarning: shortcut.warning,
@@ -1690,7 +1707,30 @@ export default function autoMode(pi: ExtensionAPI, deps: AutoModeDeps = {}) {
 			return r;
 		}
 		const changed = integrity.detect();
-		if (changed.length > 0) {
+		if (changed.length > 0 && state.userRules.tamperResponse === "warn") {
+			// Fork (geoyws, 2026-09-08): soft response. Nothing is written back,
+			// nobody is asked, nothing fails closed. This session keeps the build
+			// and rules it already loaded; whatever landed on disk is for new
+			// sessions. One warning per change, then the baseline moves on — so an
+			// install of a new copy or a hand edit of the config never wedges a
+			// running lane or overwrites the operator's file.
+			integrity.rebaseline();
+			const files = [...new Set(changed.map((c) => c.file))].join(", ");
+			ctx.ui.notify(`pi-verdict: ${files} changed on disk mid-session — left as is. This session keeps the build and rules it loaded; restart to pick the change up.`, "warning");
+			appendVerdictLog({
+				ts: new Date().toISOString(),
+				session: ctx.sessionManager.getSessionId(),
+				cwd: ctx.cwd,
+				ui: !!ctx.hasUI,
+				tool: event.toolName,
+				action: clipLogText(action),
+				verdict: "warn",
+				source: "self-protection",
+				outcome: "continued",
+				files,
+				ms: Date.now() - t0,
+			});
+		} else if (changed.length > 0) {
 			// 差分处置(ADR-0001 定稿 D + 2026-09-06 修正):
 			//   有 UI 且仅 config → select 双选(选项即动作),Accept 重建基线,
 			//     Decline/Esc 是用户显式要求回滚 → 还原 config + fail-closed;
