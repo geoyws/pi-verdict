@@ -12,7 +12,8 @@ Everything the gate reads from disk lives in `<agentDir>/config/pi-verdict.json`
   "ignoreTools": ["todo", "web_search"],
   "builtinDenyFloor": true,
   "classifierModel": null,
-  "toggleShortcut": "ctrl+shift+a"
+  "toggleShortcut": "ctrl+shift+a",
+  "enabledByDefault": true
 }
 ```
 
@@ -24,6 +25,7 @@ Everything the gate reads from disk lives in `<agentDir>/config/pi-verdict.json`
 - `classifierModel: "provider/model-id"` sets the classifier model (e.g. a fast flash-class model); precedence is flag > env > config > session model (self-reflection); an invalid value falls back to the session model with a one-time warning.
 - The spec accepts pi's native `--model` thinking suffix: `"zai/glm-5.3-flash:low"` sets classifier thinking to effort low (default without suffix: thinking explicitly off).
 - `toggleShortcut` rebinds the master-switch toggle key (`null` or empty disables it, not persisted).
+- `enabledByDefault` (fork) seeds the master switch at session start when neither `--auto-mode` nor `--no-auto-mode` was passed. `true` (the default, and upstream's behaviour) starts gated; `false` starts **ungated** — the footer shows `auto mode off` and every tool call runs directly until `/automode on` or the toggle key. Only a literal `false` turns it off; a missing, `null` or mistyped value keeps the gate on. Read once per session, like `toggleShortcut`; the config reload at `session_start` never reverts a runtime `/automode` choice.
 
 ## Why no built-in allowlist?
 

@@ -74,7 +74,9 @@ function makeHarness(cwd: string = "/proj", opts?: { ompRegistry?: boolean }): H
 	h.ctx = ctx;
 
 	h.install = (opts?: { flag?: boolean; debug?: boolean; modelFlag?: string; compatLoader?: () => Promise<{ complete: any }>; protectedSet?: ProtectedSet }) => {
-		flags = { "auto-mode": opts?.flag ?? true, "auto-mode-debug": opts?.debug ?? false, ...(opts?.modelFlag ? { "auto-mode-model": opts.modelFlag } : {}) };
+		// flag unset → undefined (registerFlag has no default for auto-mode, so the
+		// config key seeds the switch); an explicit boolean models --auto-mode/--no-auto-mode
+		flags = { ...(opts?.flag !== undefined ? { "auto-mode": opts.flag } : {}), "auto-mode-debug": opts?.debug ?? false, ...(opts?.modelFlag ? { "auto-mode-model": opts.modelFlag } : {}) };
 		const prev = process.env.PI_AUTO_MODE_DEBUG;
 		if (opts?.debug) process.env.PI_AUTO_MODE_DEBUG = "1"; else delete process.env.PI_AUTO_MODE_DEBUG;
 		autoMode({
@@ -95,7 +97,7 @@ function makeHarness(cwd: string = "/proj", opts?: { ompRegistry?: boolean }): H
 beforeAll(() => { process.env.PI_CODING_AGENT_DIR = TMP_AGENT; });
 afterAll(() => { delete process.env.PI_CODING_AGENT_DIR; });
 
-function setConfig(cfg: { allow?: string[]; deny?: string[]; denyPaths?: unknown[]; ignoreTools?: unknown[]; builtinDenyFloor?: boolean; classifierModel?: string | null; toggleShortcut?: string | null }, invalid?: string[]): void {
+function setConfig(cfg: { allow?: string[]; deny?: string[]; denyPaths?: unknown[]; ignoreTools?: unknown[]; builtinDenyFloor?: boolean; classifierModel?: string | null; toggleShortcut?: string | null; enabledByDefault?: unknown }, invalid?: string[]): void {
 	config = { allow: cfg.allow ?? [], deny: cfg.deny ?? [] };
 	const p = path.join(TMP_AGENT, "config", "pi-verdict.json");
 	fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -103,6 +105,7 @@ function setConfig(cfg: { allow?: string[]; deny?: string[]; denyPaths?: unknown
 	if (cfg.classifierModel !== undefined) raw.classifierModel = cfg.classifierModel;
 	if (cfg.builtinDenyFloor !== undefined) raw.builtinDenyFloor = cfg.builtinDenyFloor;
 	if (cfg.toggleShortcut !== undefined) raw.toggleShortcut = cfg.toggleShortcut;
+	if (cfg.enabledByDefault !== undefined) raw.enabledByDefault = cfg.enabledByDefault;
 	// denyPaths (ADR-0002): unknown[] lets negative tests mix in non-string entries
 	if (cfg.denyPaths !== undefined) raw.denyPaths = cfg.denyPaths;
 	// 非法正则测试:把 invalid 条目直接混入 allow 数组
@@ -796,6 +799,42 @@ describe("toggle shortcut", () => {
 		expect(raw).toContain("toggleShortcut");
 		expect(raw).toContain("ctrl+shift+a");
 		expect(raw).toContain("toggleShortcut sets the master-switch toggle key"); // _hint 说明文案
+	});
+});
+
+describe("enabledByDefault (fork)", () => {
+	test("false → session starts ungated: floor-denied command runs, footer says off", async () => {
+		const h = session({ enabledByDefault: false });
+		await h.handlers.session_start({}, h.ctx);
+		expect(h.fgCalls.at(-1)).toEqual(["warning", "auto mode off"]);
+		expect(await toolCall(h, "bash", { command: "rm " + "-rf /tmp/x" })).toBeUndefined();
+	});
+	test("false → /automode on re-arms the gate for the rest of the session", async () => {
+		const h = session({ enabledByDefault: false });
+		await h.commands.automode.handler("on", h.ctx);
+		expect(h.fgCalls.at(-1)).toEqual(["success", "auto mode on"]);
+		expect((await toolCall(h, "bash", { command: "rm " + "-rf /tmp/x" }))?.block).toBe(true);
+		await h.handlers.session_start({}, h.ctx); // rule reload must not revert the user's choice
+		expect((await toolCall(h, "bash", { command: "rm " + "-rf /tmp/x" }))?.block).toBe(true);
+	});
+	test("explicit flag wins both ways over the config key", async () => {
+		const on = session({ enabledByDefault: false }, { flag: true });
+		expect((await toolCall(on, "bash", { command: "rm " + "-rf /tmp/x" }))?.block).toBe(true);
+		const off = session({ enabledByDefault: true }, { flag: false });
+		expect(await toolCall(off, "bash", { command: "rm " + "-rf /tmp/x" })).toBeUndefined();
+	});
+	test("missing, null or mistyped value keeps the gate on", async () => {
+		for (const v of [undefined, null, "false", 0]) {
+			const h = session({ enabledByDefault: v });
+			expect((await toolCall(h, "bash", { command: "rm " + "-rf /tmp/x" }))?.block).toBe(true);
+		}
+	});
+	test("config template carries enabledByDefault: true", () => {
+		fs.rmSync(path.join(TMP_AGENT, "config"), { recursive: true, force: true });
+		const h = makeHarness(); h.install();
+		const raw = JSON.parse(fs.readFileSync(path.join(TMP_AGENT, "config", "pi-verdict.json"), "utf8"));
+		expect(raw.enabledByDefault).toBe(true);
+		expect(raw._hint).toContain("enabledByDefault");
 	});
 });
 

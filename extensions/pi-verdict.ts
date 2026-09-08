@@ -53,7 +53,12 @@
  * non-interactive modes (no UI) ask → deny.
  *
  * Configuration:
- *   --auto-mode / --no-auto-mode   CLI flag, master switch (default on)
+ *   --auto-mode / --no-auto-mode   CLI flag, master switch; explicit flag always
+ *                                   wins. Unset → config enabledByDefault (fork;
+ *                                   default true = upstream behaviour). false
+ *                                   starts the session with the gate OFF: tool
+ *                                   calls run ungated until /automode on or the
+ *                                   toggle shortcut; the footer says so.
  *   ctrl+shift+a                   master-switch toggle shortcut (default; silent
  *                                   toggle, footer always visible as the only
  *                                   feedback; config toggleShortcut rebinds/null
@@ -69,7 +74,7 @@
  *                                   <agentDir>/logs/pi-verdict-verdicts.jsonl (fork)
  *   <agentDir>/config/pi-verdict.json   user rules: { allow: [regex], deny: [regex],
  *                                   denyPaths: [path], builtinDenyFloor,
- *                                   classifierModel, toggleShortcut }
+ *                                   classifierModel, toggleShortcut, enabledByDefault }
  *                                   match target: bash = full command string /
  *                                   file tools = absolute path; new session applies;
  *                                   protected by the self-protection layer (the
@@ -271,9 +276,14 @@ interface UserRules {
 	 *  are inert: those are governed by the deny floor and user allow/deny rules,
 	 *  which this list can never weaken. */
 	ignoreTools: string[];
+	/** Fork: initial master-switch state when no --auto-mode/--no-auto-mode flag
+	 *  was passed. Default true (upstream semantics). false = the session starts
+	 *  ungated and the owner opts in per session via /automode on or the toggle
+	 *  shortcut. Read once at install, like toggleShortcut. */
+	enabledByDefault: boolean;
 }
 
-const EMPTY_RULES: UserRules = { allow: [], deny: [], denyPaths: [], builtinDenyFloor: true, classifierModel: null, toggleShortcut: DEFAULT_TOGGLE_SHORTCUT, ignoreTools: [] };
+const EMPTY_RULES: UserRules = { allow: [], deny: [], denyPaths: [], builtinDenyFloor: true, classifierModel: null, toggleShortcut: DEFAULT_TOGGLE_SHORTCUT, ignoreTools: [], enabledByDefault: true };
 
 /** This module's own file location (import.meta.url resolved; null = unresolvable). */
 const OWN_FILE_PATH: string | null = (() => {
@@ -322,7 +332,7 @@ function userConfigPath(): string {
 }
 
 const USER_CONFIG_TEMPLATE = `${JSON.stringify({
-	_hint: "pi-verdict user rules. allow/deny are JS regex arrays; deny wins over allow. Match target: bash = full command string, file tools = absolute path. denyPaths is a list of protected path prefixes (plain paths, not regexes; the tool owns normalization — ~, $HOME, relative, .. and symlink forms all resolve, case folds on macOS/Windows — and any access attempt, including from bash command strings, asks for your confirmation, degrading to deny in non-interactive sessions; priority: after your deny rules, before your allow rules; never sent to the classifier). ignoreTools is a list of tool names outside the command/file families (e.g. todo, web_search, MCP/custom tools) that skip adjudication entirely — allow with zero model calls; entries naming covered tools (bash/read/write/edit/grep/find/ls/powershell) are inert: those stay governed by the deny floor and your allow/deny rules. builtinDenyFloor=false disables the built-in danger/path floor (at your own risk; the self-protection layer always stays on and cannot be turned off by any config). classifierModel persistently sets the classifier model (provider/id, e.g. zai/glm-5.3-flash; accepts a pi-native thinking suffix, e.g. zai/glm-5.3-flash:low; empty = self-reflection, inherit session model). toggleShortcut sets the master-switch toggle key (pi key combo, e.g. ctrl+shift+a; null or empty disables the shortcut). This file is part of the permission gate itself: pi-verdict denies any agent-side modification of it — edit it manually outside pi. Changes apply to new sessions.",
+	_hint: "pi-verdict user rules. allow/deny are JS regex arrays; deny wins over allow. Match target: bash = full command string, file tools = absolute path. denyPaths is a list of protected path prefixes (plain paths, not regexes; the tool owns normalization — ~, $HOME, relative, .. and symlink forms all resolve, case folds on macOS/Windows — and any access attempt, including from bash command strings, asks for your confirmation, degrading to deny in non-interactive sessions; priority: after your deny rules, before your allow rules; never sent to the classifier). ignoreTools is a list of tool names outside the command/file families (e.g. todo, web_search, MCP/custom tools) that skip adjudication entirely — allow with zero model calls; entries naming covered tools (bash/read/write/edit/grep/find/ls/powershell) are inert: those stay governed by the deny floor and your allow/deny rules. builtinDenyFloor=false disables the built-in danger/path floor (at your own risk; the self-protection layer always stays on and cannot be turned off by any config). classifierModel persistently sets the classifier model (provider/id, e.g. zai/glm-5.3-flash; accepts a pi-native thinking suffix, e.g. zai/glm-5.3-flash:low; empty = self-reflection, inherit session model). toggleShortcut sets the master-switch toggle key (pi key combo, e.g. ctrl+shift+a; null or empty disables the shortcut). enabledByDefault sets the master switch at session start when no --auto-mode/--no-auto-mode flag is given (true = gate on, the default; false = start ungated and opt in with /automode on or the toggle key). This file is part of the permission gate itself: pi-verdict denies any agent-side modification of it — edit it manually outside pi. Changes apply to new sessions.",
 	allow: ["^ls\\b"],
 	deny: [],
 	denyPaths: [],
@@ -330,6 +340,7 @@ const USER_CONFIG_TEMPLATE = `${JSON.stringify({
 	builtinDenyFloor: true,
 	classifierModel: null,
 	toggleShortcut: DEFAULT_TOGGLE_SHORTCUT,
+	enabledByDefault: true,
 }, null, 2)}\n`;
 
 /**
@@ -347,7 +358,7 @@ function loadUserRules(): { rules: UserRules; skipped: string[]; shortcutWarning
 			} catch { /* 只读环境静默跳过 */ }
 			return { rules: EMPTY_RULES, skipped: [], shortcutWarning: null };
 		}
-		let raw: { allow?: unknown; deny?: unknown; denyPaths?: unknown; ignoreTools?: unknown; builtinDenyFloor?: unknown; classifierModel?: unknown; toggleShortcut?: unknown };
+		let raw: { allow?: unknown; deny?: unknown; denyPaths?: unknown; ignoreTools?: unknown; builtinDenyFloor?: unknown; classifierModel?: unknown; toggleShortcut?: unknown; enabledByDefault?: unknown };
 		try {
 			raw = JSON.parse(fs.readFileSync(p, "utf8")) as typeof raw;
 		} catch (err) {
@@ -394,6 +405,9 @@ function loadUserRules(): { rules: UserRules; skipped: string[]; shortcutWarning
 				builtinDenyFloor: raw.builtinDenyFloor !== false,
 				classifierModel: typeof raw.classifierModel === "string" && raw.classifierModel.trim() ? raw.classifierModel.trim() : null,
 				toggleShortcut: shortcut.key,
+				// Only a literal false turns the default off: a missing, null or mistyped
+				// value keeps upstream's gate-on start, so a typo cannot silently ungate
+				enabledByDefault: raw.enabledByDefault !== false,
 			},
 			skipped,
 			shortcutWarning: shortcut.warning,
@@ -1461,15 +1475,21 @@ export interface AutoModeDeps {
 }
 
 export default function autoMode(pi: ExtensionAPI, deps: AutoModeDeps = {}) {
-	pi.registerFlag("auto-mode", { description: "Enable Auto Mode (rules + model classifier gating for tool calls)", type: "boolean", default: true });
+	// No `default` on auto-mode: an unset flag must read as undefined so the config
+	// key can seed the switch; `--auto-mode` / `--no-auto-mode` still always win
+	pi.registerFlag("auto-mode", { description: "Enable Auto Mode (rules + model classifier gating for tool calls); unset → config enabledByDefault", type: "boolean" });
 	pi.registerFlag("auto-mode-model", { description: "Classifier model as provider/id[:thinking] (pi --model syntax; default: inherit session model)", type: "string" });
 	pi.registerFlag("auto-mode-debug", { description: "Notify every verdict incl. allows, with shadow-cache annotation", type: "boolean", default: false });
 
-	let enabled = pi.getFlag("auto-mode") !== false;
 	const debug = pi.getFlag("auto-mode-debug") === true || process.env.PI_AUTO_MODE_DEBUG === "1";
 	// 会话态与门禁完整性监视:复位清单各归 SessionState.reset / IntegrityWatch.startSession
 	const state = new SessionState(deps.protectedSet ?? buildProtectedSet(agentDirPath(), OWN_FILE_PATH));
 	const integrity = new IntegrityWatch(state.prot.watchBases);
+	// Master switch seed (fork): explicit CLI flag > config enabledByDefault > on.
+	// Read once here, like toggleShortcut — a later /automode or toggle is the
+	// user's runtime choice and session_start's rule reload must not undo it.
+	const autoModeFlag = pi.getFlag("auto-mode");
+	let enabled = typeof autoModeFlag === "boolean" ? autoModeFlag : state.userRules.enabledByDefault;
 
 	/** 篡改处置呈现:按 kind 差分的回写 + fail-closed 通知(含文件清单、处置与原因)。
 	 *  restoreConfig 只由用户显式的 Decline/Esc 传入(ADR-0001 修正 2026-09-06);

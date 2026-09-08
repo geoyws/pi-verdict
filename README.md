@@ -77,7 +77,7 @@ pi-verdict runs on both [pi](https://github.com/badlogic/pi-mono) and [oh-my-pi]
 
 | Option | Default | Description |
 |---|---|---|
-| `--auto-mode` / `--no-auto-mode` | on | master switch |
+| `--auto-mode` / `--no-auto-mode` | config `enabledByDefault` (on) | master switch; an explicit flag always wins |
 | `--auto-mode-model provider/id` | session model | classifier model ("self-reflection" by default) |
 | `--auto-mode-debug` | off | full verdict notifications |
 | `PI_AUTO_MODE_MODEL` | — | env form of the model flag |
@@ -94,7 +94,8 @@ pi-verdict runs on both [pi](https://github.com/badlogic/pi-mono) and [oh-my-pi]
   "ignoreTools": ["todo", "web_search"],
   "builtinDenyFloor": true,
   "classifierModel": null,
-  "toggleShortcut": "ctrl+shift+a"
+  "toggleShortcut": "ctrl+shift+a",
+  "enabledByDefault": true
 }
 ```
 
